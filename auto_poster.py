@@ -1,140 +1,191 @@
-import os
-import sys
 import asyncio
-from telethon import TelegramClient, Button
+import json
+import os
+import re
+from pathlib import Path
 from dotenv import load_dotenv
+from telethon import TelegramClient, events
 
-# === Load ENV ===
+# === Load .env ===
 load_dotenv()
 
-api_id = int(os.getenv("API_ID"))
-api_hash = os.getenv("API_HASH")
-foto_channel = int(os.getenv("FOTO_CHANNEL"))
-link_channel = int(os.getenv("LINK_CHANNEL"))
-target_channel = int(os.getenv("TARGET_CHANNEL"))
-delay_seconds = int(os.getenv("DELAY_SECONDS", "60"))
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+FOTO_CHANNEL = int(os.getenv("FOTO_CHANNEL"))
+LINK_CHANNEL = int(os.getenv("LINK_CHANNEL"))
+TARGET_CHANNEL = os.getenv("TARGET_CHANNEL")
+INTERVAL_MINUTES = int(os.getenv("FORWARD_INTERVAL_MINUTES", "30"))
+START_FROM_ID = int(os.getenv("START_FROM_ID", "0"))
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# === Global State ===
+
+PROGRESS_FILE = Path("progress.json")
+NAMA_FILE = Path("teks.txt")
+
 is_running = False
-custom_delays = None
-button_title = "🎬 TONTON DSINI"
-button_link = "https://example.com"
+interval_minutes = INTERVAL_MINUTES
+start_from_id = START_FROM_ID
+forward_task = None
+nama_index = 0
 
-# === Utility ===
-def load_texts(filename="teks.txt"):
-    try:
-        with open(filename, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip()]
-    except FileNotFoundError:
-        print("❌ File teks.txt tidak ditemukan!")
+
+# === Baca nama dari teks.txt ===
+def load_nama_list():
+    if not NAMA_FILE.exists():
+        print("⚠️ File teks.txt tidak ditemukan.")
         return []
+    with open(NAMA_FILE, "r", encoding="utf-8") as f:
+        return [x.strip() for x in f.readlines() if x.strip()]
 
-def extract_link(msg):
-    text = msg.message or ""
-    for word in text.split():
-        if word.startswith("http://") or word.startswith("https://") or word.startswith("www."):
-            return word.strip()
-    return None
 
-async def send_post(client, foto_msg, link_msg, teks, index, total):
-    global button_title, button_link
-    media = foto_msg.photo or foto_msg.video or foto_msg.file
-    if not media:
-        print(f"⚠️ [{index+1}] Tidak ada media, dilewati.")
-        return
-    url = extract_link(link_msg)
-    if not url:
-        print(f"⚠️ [{index+1}] Tidak ada link, dilewati.")
-        return
-    caption = f"{teks}\n\ntonton dsini\n{url}"
-    buttons = [[Button.url(button_title, button_link)]]
-    await client.send_file(target_channel, file=media, caption=caption, buttons=buttons)
-    print(f"📤 [{index+1}/{total}] Terkirim: {teks[:40]}...")
-
-async def start_posting(client, texts, foto_msgs, link_msgs):
-    global is_running, custom_delays
-    total = min(len(foto_msgs), len(link_msgs), len(texts))
-    print(f"📦 Siap mengirim {total} posting...\n")
-    is_running = True
-    for i in range(total):
-        if not is_running:
-            print("⏸️ Dihentikan oleh user (/off)")
-            break
-        await send_post(client, foto_msgs[i], link_msgs[i], texts[i], i, total)
-        if i < total - 1:
-            delay = (custom_delays[i] if (custom_delays and i < len(custom_delays)) else delay_seconds)
-            print(f"⏳ Delay {delay} detik...")
-            await asyncio.sleep(delay)
-    print("🚀 Semua posting selesai atau dihentikan.")
-
-async def handle_command(cmd, client):
-    global is_running, custom_delays, button_title, button_link
-    if cmd.startswith("/setting"):
-        parts = cmd.split()[1:]
+# === Simpan & baca progress ===
+def load_progress():
+    if PROGRESS_FILE.exists():
         try:
-            custom_delays = [int(p) for p in parts]
-            print(f"⚙️ Delay custom diatur: {custom_delays}")
-        except ValueError:
-            print("❌ Format salah. Contoh: /setting 60 30 120")
-    elif cmd.startswith("/judul"):
-        title = cmd.replace("/judul", "", 1).strip()
-        if title:
-            button_title = title
-            print(f"🆕 Judul tombol diubah jadi: {button_title}")
-        else:
-            print("❌ Format salah. Contoh: /judul 🎬 Tonton Sekarang")
-    elif cmd.startswith("/link"):
-        link = cmd.replace("/link", "", 1).strip()
-        if link.startswith("http://") or link.startswith("https://") or link.startswith("www."):
-            button_link = link
-            print(f"🔗 Link tombol diubah jadi: {button_link}")
-        else:
-            print("❌ Format salah. Contoh: /link https://example.com")
-    elif cmd == "/on":
-        is_running = True
-        print("✅ Mode ON aktif.")
-    elif cmd == "/off":
-        is_running = False
-        print("🛑 Mode OFF — Bot dijeda.")
-    elif cmd == "/help":
-        print("\n=== DAFTAR COMMAND ===")
-        print("/start   → mulai posting dari urutan 1")
-        print("/setting <angka...> → ubah delay (contoh: /setting 60 30 90)")
-        print("/judul <teks> → ubah teks tombol")
-        print("/link <url> → ubah link tombol")
-        print("/on → aktifkan bot")
-        print("/off → hentikan bot sementara")
-        print("/help → tampilkan bantuan")
-        print("/exit → keluar dari bot\n")
-    elif cmd == "/exit":
-        print("👋 Keluar dari bot.")
-        sys.exit(0)
-    elif cmd == "/start":
-        texts = load_texts()
-        if not texts:
-            print("⚠️ teks.txt kosong / tidak ditemukan.")
-            return
-        foto_msgs = [m async for m in client.iter_messages(foto_channel, limit=len(texts))]
-        link_msgs = [m async for m in client.iter_messages(link_channel, limit=len(texts))]
-        foto_msgs.reverse()
-        link_msgs.reverse()
-        await start_posting(client, texts, foto_msgs, link_msgs)
-    else:
-        print("❓ Perintah tidak dikenal. Gunakan /help untuk daftar lengkap.")
+            data = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+            return int(data.get("last_id", 0)), int(data.get("nama_index", 0))
+        except Exception:
+            return 0, 0
+    return 0, 0
 
-async def main():
-    async with TelegramClient("autoposter_session", api_id, api_hash) as client:
-        print("✅ Login berhasil.")
-        print("\nKetik /help untuk melihat semua command.\n")
-        while True:
-            try:
-                cmd = input("CMD> ").strip()
-                await handle_command(cmd, client)
-            except KeyboardInterrupt:
-                print("\n🛑 Keluar dari bot.")
+
+def save_progress(last_id, nama_idx):
+    PROGRESS_FILE.write_text(json.dumps({"last_id": last_id, "nama_index": nama_idx}), encoding="utf-8")
+
+
+# === Ambil link dari teks ===
+def extract_link(text):
+    if not text:
+        return None
+    match = re.search(r"(https?://[^\s]+)", text)
+    return match.group(1) if match else None
+
+
+# === Format caption ===
+def format_caption(nama, link):
+    return f"{nama}\n\ntonton dasini\n{link}"
+
+
+# === Proses kirim ===
+async def autopost(client: TelegramClient, foto_channel, link_channel, target):
+    global is_running, interval_minutes, start_from_id, forward_task, nama_index
+
+    nama_list = load_nama_list()
+    if not nama_list:
+        print("⚠️ Tidak ada nama di teks.txt.")
+        return
+
+    try:
+        last_saved, nama_idx = load_progress()
+        nama_index = nama_idx
+
+        foto_msgs = [m async for m in client.iter_messages(foto_channel, reverse=True)]
+        link_msgs = [m async for m in client.iter_messages(link_channel, reverse=True)]
+
+        total = min(len(foto_msgs), len(link_msgs), len(nama_list))
+        print(f"📦 Menemukan {total} postingan siap dikirim.\n")
+
+        for i in range(total):
+            if not is_running:
+                print("⏸️ Bot dihentikan.")
                 break
+
+            foto_msg = foto_msgs[i]
+            link_msg = link_msgs[i]
+            nama = nama_list[nama_index % len(nama_list)]
+
+            link = extract_link(link_msg.text or "")
+            if not link:
+                print(f"⚠️ Link kosong pada pesan ke-{i+1}, dilewati.")
+                continue
+
+            media = foto_msg.photo or foto_msg.video
+            if not media:
+                print(f"⚠️ Media kosong pada pesan ke-{i+1}, dilewati.")
+                continue
+
+            caption = format_caption(nama, link)
+
+            try:
+                await client.send_file(target, file=media, caption=caption)
+                print(f"✅ [{i+1}/{total}] {nama} terkirim.")
+                nama_index = (nama_index + 1) % len(nama_list)
+                save_progress(foto_msg.id, nama_index)
+                await asyncio.sleep(interval_minutes * 60)
             except Exception as e:
-                print("❌ Error:", e)
+                print(f"[WARN] Gagal kirim posting ke-{i+1}: {e}")
+
+        print("✅ Semua postingan selesai.")
+    finally:
+        forward_task = None
+        is_running = False
+
+
+# === Fungsi utama ===
+async def main():
+    global is_running, interval_minutes, start_from_id, forward_task
+
+    client = TelegramClient("autopost_foto_link_nama_session", API_ID, API_HASH)
+    await client.start()
+
+    foto_channel = await client.get_entity(FOTO_CHANNEL)
+    link_channel = await client.get_entity(LINK_CHANNEL)
+    target = await client.get_entity(TARGET_CHANNEL)
+
+    print("=" * 60)
+    print("🚀 AUTOPOST FOTO + LINK + NAMA (Full Auto, Single CMD)")
+    print(f"📤 FOTO_CHANNEL : {FOTO_CHANNEL}")
+    print(f"🔗 LINK_CHANNEL : {LINK_CHANNEL}")
+    print(f"📥 TARGET_CHANNEL : {TARGET_CHANNEL}")
+    print(f"⏱️ Interval : {interval_minutes} menit")
+    print("=" * 60)
+
+    @client.on(events.NewMessage(from_users=OWNER_ID))
+    async def command_handler(event):
+        global is_running, interval_minutes, start_from_id, forward_task
+
+        cmd = event.raw_text.strip()
+        args = cmd.lower().split()
+
+        if cmd == "/on":
+            if is_running or forward_task:
+                await event.reply("⚠️ Sudah aktif.")
+            else:
+                is_running = True
+                forward_task = asyncio.create_task(autopost(client, foto_channel, link_channel, target))
+                await event.reply("✅ Bot mulai kirim postingan otomatis.")
+
+        elif cmd == "/off":
+            is_running = False
+            if forward_task:
+                forward_task.cancel()
+                forward_task = None
+            await event.reply("🛑 Bot dihentikan.")
+
+        elif cmd.startswith("/setting"):
+            if len(args) == 2 and args[1].isdigit():
+                val = int(args[1])
+                interval_minutes = val
+                await event.reply(f"✅ Interval diubah ke {val} menit.")
+            else:
+                await event.reply("⚙️ Gunakan: /setting <menit>")
+
+        elif cmd == "/status":
+            status = "🟢 Aktif" if is_running else "🔴 Nonaktif"
+            await event.reply(
+                f"📊 Status: {status}\n"
+                f"⏱️ Interval: {interval_minutes} menit\n"
+                f"🏷️ Nama index: {nama_index}\n"
+                f"📸 Foto: {FOTO_CHANNEL}\n"
+                f"🔗 Link: {LINK_CHANNEL}\n"
+                f"📥 Target: {TARGET_CHANNEL}"
+            )
+
+        else:
+            await event.reply("❓ /on | /off | /status | /setting <menit>")
+
+    await client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
