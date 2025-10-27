@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, RPCError, ConnectionError as TgConnectionError
+from telethon.errors import FloodWaitError, RPCError
 
 # === Load .env ===
 load_dotenv()
@@ -83,7 +83,7 @@ async def find_index_by_link(client: TelegramClient, link_channel, target_link: 
     return None
 
 
-# === Fungsi utama autopost ===
+# === Proses autopost ===
 async def autopost(client: TelegramClient, foto_channel, link_channel, target, start_index=0):
     global is_running, interval_minutes, forward_task, nama_index
 
@@ -126,7 +126,7 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
         caption = format_caption(nama, link)
 
         try:
-            # === FIX: unduh media agar tidak pakai file reference lama ===
+            # === FIX: download media supaya tidak error file reference expired ===
             file_path = await foto_msg.download_media(file=f"temp_{foto_msg.id}")
             if not file_path:
                 print(f"⚠️ Media gagal diunduh pada pesan ke-{i+1}, dilewati.")
@@ -146,7 +146,7 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
 
         except RPCError as e:
             if "file reference" in str(e).lower():
-                print(f"⚠️ File reference expired di pesan {i+1}, download ulang.")
+                print(f"⚠️ File reference expired di pesan {i+1}, mencoba ulang...")
                 try:
                     file_path = await foto_msg.download_media(file=f"temp_retry_{foto_msg.id}")
                     await client.send_file(target, file=file_path, caption=caption)
@@ -156,6 +156,10 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
             else:
                 print(f"[RPC ERROR] {e}")
                 await asyncio.sleep(5)
+
+        except (OSError, ConnectionError) as e:
+            print(f"⚠️ Koneksi jaringan error: {e}. Menunggu 5 detik...")
+            await asyncio.sleep(5)
 
         except Exception as e:
             print(f"[WARN] Gagal kirim posting ke-{i+1}: {e}")
@@ -178,7 +182,7 @@ async def main():
     target = await client.get_entity(TARGET_CHANNEL)
 
     print("=" * 60)
-    print("🚀 AUTOPOST FOTO + LINK + NAMA (Versi Stabil)")
+    print("🚀 AUTOPOST FOTO + LINK + NAMA (Stable v3.1)")
     print(f"📤 FOTO_CHANNEL : {FOTO_CHANNEL}")
     print(f"🔗 LINK_CHANNEL : {LINK_CHANNEL}")
     print(f"📥 TARGET_CHANNEL : {TARGET_CHANNEL}")
@@ -190,7 +194,7 @@ async def main():
         global is_running, interval_minutes, start_from_index, forward_task
 
         text = (event.raw_text or "").strip()
-        # 🔒 Abaikan semua pesan tanpa awalan "/"
+        # 🔒 Abaikan pesan tanpa awalan "/"
         if not text.startswith("/"):
             return
 
@@ -266,8 +270,8 @@ async def main():
     while True:
         try:
             await client.run_until_disconnected()
-        except TgConnectionError:
-            print("⚠️ Koneksi terputus. Reconnect 5 detik...")
+        except (OSError, ConnectionError) as e:
+            print(f"⚠️ Koneksi terputus: {e}. Reconnect 5 detik...")
             await asyncio.sleep(5)
         except Exception as e:
             if "PersistentTimestampOutdatedError" in str(e):
