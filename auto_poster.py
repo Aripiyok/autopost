@@ -5,7 +5,10 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, RPCError, ConnectionError as TgConnectionError
+from telethon.errors import FloodWaitError, RPCError
+
+# Tambahkan alias ConnectionError agar kode lama tetap jalan
+TgConnectionError = ConnectionError
 
 # === Load .env ===
 load_dotenv()
@@ -180,7 +183,6 @@ async def main():
         global is_running, interval_minutes, start_from_index, forward_task
 
         text = (event.raw_text or "").strip()
-        # 🔒 Abaikan pesan tanpa /
         if not text.startswith("/"):
             return
 
