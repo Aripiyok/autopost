@@ -15,7 +15,7 @@ API_HASH = os.getenv("API_HASH")
 FOTO_CHANNEL = int(os.getenv("FOTO_CHANNEL"))
 LINK_CHANNEL = int(os.getenv("LINK_CHANNEL"))
 TARGET_CHANNEL = os.getenv("TARGET_CHANNEL")
-INTERVAL_MINUTES = int(os.getenv("FORWARD_INTERVAL_MINUTES", "30"))
+INTERVAL_MINUTES = float(os.getenv("FORWARD_INTERVAL_MINUTES", "0.5"))  # default 30 detik
 START_FROM_ID = int(os.getenv("START_FROM_ID", "0"))
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
@@ -87,6 +87,10 @@ async def find_index_by_link(client: TelegramClient, link_channel, target_link: 
 async def autopost(client: TelegramClient, foto_channel, link_channel, target, start_index=0):
     global is_running, interval_minutes, forward_task, nama_index
 
+    if not is_running:
+        print("⚠️ Autopost dibatalkan karena bot tidak aktif.")
+        return
+
     nama_list = load_nama_list()
     if not nama_list:
         print("⚠️ Tidak ada nama di teks.txt.")
@@ -126,7 +130,6 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
         caption = format_caption(nama, link)
 
         try:
-            # === FIX: download media supaya tidak error file reference expired ===
             file_path = await foto_msg.download_media(file=f"temp_{foto_msg.id}")
             if not file_path:
                 print(f"⚠️ Media gagal diunduh pada pesan ke-{i+1}, dilewati.")
@@ -157,16 +160,16 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
                 print(f"[RPC ERROR] {e}")
                 await asyncio.sleep(5)
 
-        except (OSError, ConnectionError) as e:
-            print(f"⚠️ Koneksi jaringan error: {e}. Menunggu 5 detik...")
-            await asyncio.sleep(5)
-
         except Exception as e:
+            if "PersistentTimestampOutdatedError" in str(e):
+                print("⚠️ Telegram desync, lanjut tanpa menghentikan bot...")
+                continue
             print(f"[WARN] Gagal kirim posting ke-{i+1}: {e}")
             await asyncio.sleep(10)
 
     print("✅ Semua postingan selesai.")
-    is_running = False
+    if i + 1 >= total:
+        is_running = False
     forward_task = None
 
 
@@ -182,11 +185,11 @@ async def main():
     target = await client.get_entity(TARGET_CHANNEL)
 
     print("=" * 60)
-    print("🚀 AUTOPOST FOTO + LINK + NAMA (Stable v3.1)")
+    print("🚀 AUTOPOST FOTO + LINK + NAMA (Stable v3.4)")
     print(f"📤 FOTO_CHANNEL : {FOTO_CHANNEL}")
     print(f"🔗 LINK_CHANNEL : {LINK_CHANNEL}")
     print(f"📥 TARGET_CHANNEL : {TARGET_CHANNEL}")
-    print(f"⏱️ Interval : {interval_minutes} menit")
+    print(f"⏱️ Interval : {interval_minutes} menit ({round(interval_minutes*60,2)} detik)")
     print("=" * 60)
 
     @client.on(events.NewMessage(from_users=OWNER_ID))
@@ -202,14 +205,14 @@ async def main():
         cmd = args[0].lower()
 
         if cmd == "/on":
-            if is_running:
-                await event.reply("⚠️ Sudah aktif.")
-            else:
-                is_running = True
-                forward_task = asyncio.create_task(
-                    autopost(client, foto_channel, link_channel, target, start_from_index)
-                )
-                await event.reply(f"✅ Bot mulai kirim postingan otomatis dari urutan {start_from_index + 1}.")
+            if is_running or forward_task:
+                await event.reply("⚠️ Bot sudah berjalan.")
+                return
+            is_running = True
+            forward_task = asyncio.create_task(
+                autopost(client, foto_channel, link_channel, target, start_from_index)
+            )
+            await event.reply(f"✅ Bot mulai kirim postingan otomatis dari urutan {start_from_index + 1}.")
 
         elif cmd == "/off":
             is_running = False
@@ -222,7 +225,7 @@ async def main():
             status = "🟢 Aktif" if is_running else "🔴 Nonaktif"
             await event.reply(
                 f"📊 Status: {status}\n"
-                f"⏱️ Interval: {interval_minutes} menit\n"
+                f"⏱️ Interval: {interval_minutes} menit ({round(interval_minutes*60,2)} detik)\n"
                 f"▶️ Mulai dari: {start_from_index + 1}\n"
                 f"🏷️ Nama index: {nama_index}\n"
                 f"📸 Foto: {FOTO_CHANNEL}\n"
@@ -231,17 +234,28 @@ async def main():
             )
 
         elif cmd.startswith("/setting"):
-            if len(args) == 2 and args[1].isdigit():
-                interval_minutes = int(args[1])
-                await event.reply(f"✅ Interval diubah ke {interval_minutes} menit.")
+            if len(args) == 2:
+                try:
+                    val = float(args[1])
+                    if val <= 0:
+                        await event.reply("⚠️ Interval harus lebih dari 0.")
+                        return
+                    interval_minutes = val
+                    detik = round(val * 60, 2)
+                    await event.reply(f"✅ Interval diubah ke {val} menit ({detik} detik).")
+                except ValueError:
+                    await event.reply("⚙️ Gunakan: /setting <menit> (contoh: /setting 0.05 untuk 3 detik)")
             else:
-                await event.reply("⚙️ Gunakan: /setting <menit>")
+                await event.reply("⚙️ Gunakan: /setting <menit> (contoh: /setting 0.5 = 30 detik)")
 
         elif cmd.startswith("/start"):
             if len(args) == 2:
                 arg = args[1].strip()
                 if arg.isdigit():
                     start_from_index = int(arg)
+                    if is_running or forward_task:
+                        await event.reply("⚠️ Bot sudah berjalan, matikan dulu dengan /off")
+                        return
                     is_running = True
                     forward_task = asyncio.create_task(
                         autopost(client, foto_channel, link_channel, target, start_from_index)
@@ -270,16 +284,29 @@ async def main():
     while True:
         try:
             await client.run_until_disconnected()
+
         except (OSError, ConnectionError) as e:
-            print(f"⚠️ Koneksi terputus: {e}. Reconnect 5 detik...")
+            print(f"⚠️ Jaringan terputus: {e}. Reconnect 5 detik...")
             await asyncio.sleep(5)
+            try:
+                if not await client.is_connected():
+                    await client.connect()
+                    print("🔁 Client tersambung ulang ke Telegram.")
+            except Exception as err:
+                print(f"❌ Gagal reconnect: {err}")
+            continue
+
         except Exception as e:
             if "PersistentTimestampOutdatedError" in str(e):
-                print("⚠️ Sinkronisasi Telegram kedaluwarsa, reset client...")
-                await client.disconnect()
-                await asyncio.sleep(5)
-                await client.connect()
+                print("⚠️ Telegram desync: memperbarui timestamp client tanpa memutus event handler...")
+                try:
+                    await client.connect()
+                    print("🔁 Sinkronisasi Telegram berhasil diperbarui.")
+                except Exception as err:
+                    print(f"❌ Gagal sync ulang: {err}")
+                    await asyncio.sleep(5)
                 continue
+
             print(f"[MAIN ERROR] {e}")
             await asyncio.sleep(5)
 
