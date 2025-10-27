@@ -22,6 +22,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 PROGRESS_FILE = Path("progress.json")
 NAMA_FILE = Path("teks.txt")
 
+# === Global state ===
 is_running = False
 interval_minutes = INTERVAL_MINUTES
 start_from_index = START_FROM_ID
@@ -69,7 +70,7 @@ def format_caption(nama, link):
     return f"{nama}\n\ntonton dasini\n{link}"
 
 
-# === Proses kirim ===
+# === Proses autopost ===
 async def autopost(client: TelegramClient, foto_channel, link_channel, target, start_index=0):
     global is_running, interval_minutes, forward_task, nama_index
 
@@ -79,12 +80,10 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
         is_running = False
         return
 
-    last_saved, nama_idx = load_progress()
-    nama_index = nama_idx
-
     try:
-        foto_msgs = [m async for m in client.iter_messages(foto_channel, reverse=True)]
-        link_msgs = [m async for m in client.iter_messages(link_channel, reverse=True)]
+        # urutan dari lama ke baru (reverse=False)
+        foto_msgs = [m async for m in client.iter_messages(foto_channel, reverse=False)]
+        link_msgs = [m async for m in client.iter_messages(link_channel, reverse=False)]
     except Exception as e:
         print(f"[ERROR] Gagal ambil pesan: {e}")
         is_running = False
@@ -96,7 +95,7 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
         is_running = False
         return
 
-    print(f"📦 Menemukan {total} postingan siap dikirim. Mulai dari {start_index + 1}\n")
+    print(f"📦 Menemukan {total} postingan siap dikirim. Mulai dari urutan {start_index + 1}\n")
 
     for i in range(start_index, total):
         if not is_running:
@@ -129,18 +128,12 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
         except FloodWaitError as e:
             print(f"🚨 Flood wait {e.seconds}s — menunggu...")
             await asyncio.sleep(e.seconds + 5)
-
         except TgConnectionError:
             print("⚠️ Koneksi terputus, mencoba ulang...")
             await client.connect()
-            if not await client.is_user_authorized():
-                print("🚫 Sesi tidak terautentikasi.")
-                break
-
         except RPCError as e:
             print(f"[RPC ERROR] {e}")
             await asyncio.sleep(10)
-
         except Exception as e:
             print(f"[WARN] Gagal kirim posting ke-{i+1}: {e}")
             await asyncio.sleep(10)
@@ -153,14 +146,12 @@ async def autopost(client: TelegramClient, foto_channel, link_channel, target, s
 # === Cari index berdasarkan link ===
 async def find_index_by_link(client: TelegramClient, link_channel, target_link: str):
     print(f"🔍 Mencari link '{target_link}' di channel link...")
-    idx = 0
-    async for msg in client.iter_messages(link_channel, reverse=True):
-        text = msg.text or ""
-        found_link = extract_link(text)
-        if found_link and target_link in found_link:
-            print(f"✅ Link ditemukan di urutan {idx}")
-            return idx
-        idx += 1
+    msgs = [m async for m in client.iter_messages(link_channel, reverse=False)]
+    for i, msg in enumerate(msgs):
+        found = extract_link(msg.text or "")
+        if found and target_link in found:
+            print(f"✅ Link ditemukan di urutan {i}")
+            return i
     print("⚠️ Link tidak ditemukan di channel.")
     return None
 
@@ -169,7 +160,7 @@ async def find_index_by_link(client: TelegramClient, link_channel, target_link: 
 async def main():
     global is_running, interval_minutes, start_from_index, forward_task
 
-    client = TelegramClient("autopost_session", API_ID, API_HASH)
+    client = TelegramClient("auto_poster_session", API_ID, API_HASH)
     await client.start()
 
     foto_channel = await client.get_entity(FOTO_CHANNEL)
@@ -188,13 +179,13 @@ async def main():
     async def command_handler(event):
         global is_running, interval_minutes, start_from_index, forward_task
 
-        cmd = event.raw_text.strip()
-
-        # 🔒 Abaikan semua pesan yang bukan command
-        if not cmd.startswith("/"):
+        text = (event.raw_text or "").strip()
+        # 🔒 Abaikan pesan tanpa /
+        if not text.startswith("/"):
             return
 
-        args = cmd.split(maxsplit=1)
+        args = text.split(maxsplit=1)
+        cmd = args[0].lower()
 
         if cmd == "/on":
             if is_running:
@@ -204,35 +195,7 @@ async def main():
                 forward_task = asyncio.create_task(
                     autopost(client, foto_channel, link_channel, target, start_from_index)
                 )
-                await event.reply("✅ Bot mulai kirim postingan otomatis.")
-
-        elif cmd.startswith("/start"):
-            if len(args) == 2:
-                arg = args[1].strip()
-                if arg.isdigit():
-                    # /start <nomor>
-                    start_from_index = int(arg)
-                    is_running = True
-                    forward_task = asyncio.create_task(
-                        autopost(client, foto_channel, link_channel, target, start_from_index)
-                    )
-                    await event.reply(f"🚀 Mulai dari posting ke-{start_from_index + 1}.")
-                elif arg.startswith("http"):
-                    # /start <link>
-                    idx = await find_index_by_link(client, link_channel, arg)
-                    if idx is not None:
-                        start_from_index = idx
-                        is_running = True
-                        forward_task = asyncio.create_task(
-                            autopost(client, foto_channel, link_channel, target, start_from_index)
-                        )
-                        await event.reply(f"🚀 Ditemukan link! Mulai dari urutan ke-{idx + 1}.")
-                    else:
-                        await event.reply("⚠️ Link tidak ditemukan di channel link.")
-                else:
-                    await event.reply("⚙️ Gunakan: /start <nomor> atau /start <link>")
-            else:
-                await event.reply("⚙️ Gunakan: /start <nomor> atau /start <link>")
+                await event.reply(f"✅ Bot mulai kirim postingan otomatis dari urutan {start_from_index + 1}.")
 
         elif cmd == "/off":
             is_running = False
@@ -241,38 +204,60 @@ async def main():
                 forward_task = None
             await event.reply("🛑 Bot dihentikan.")
 
-        elif cmd.startswith("/setting"):
-            parts = cmd.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                val = int(parts[1])
-                interval_minutes = val
-                await event.reply(f"✅ Interval diubah ke {val} menit.")
-            else:
-                await event.reply("⚙️ Gunakan: /setting <menit>")
-
         elif cmd == "/status":
             status = "🟢 Aktif" if is_running else "🔴 Nonaktif"
             await event.reply(
                 f"📊 Status: {status}\n"
                 f"⏱️ Interval: {interval_minutes} menit\n"
+                f"▶️ Mulai dari: {start_from_index + 1}\n"
                 f"🏷️ Nama index: {nama_index}\n"
-                f"▶️ Mulai dari: {start_from_index}\n"
                 f"📸 Foto: {FOTO_CHANNEL}\n"
                 f"🔗 Link: {LINK_CHANNEL}\n"
                 f"📥 Target: {TARGET_CHANNEL}"
             )
 
+        elif cmd.startswith("/setting"):
+            if len(args) == 2 and args[1].isdigit():
+                interval_minutes = int(args[1])
+                await event.reply(f"✅ Interval diubah ke {interval_minutes} menit.")
+            else:
+                await event.reply("⚙️ Gunakan: /setting <menit>")
+
+        elif cmd.startswith("/start"):
+            if len(args) == 2:
+                arg = args[1].strip()
+                if arg.isdigit():
+                    start_from_index = int(arg)
+                    is_running = True
+                    forward_task = asyncio.create_task(
+                        autopost(client, foto_channel, link_channel, target, start_from_index)
+                    )
+                    await event.reply(f"🚀 Mulai dari posting ke-{start_from_index + 1}.")
+                elif arg.startswith("http"):
+                    idx = await find_index_by_link(client, link_channel, arg)
+                    if idx is not None:
+                        start_from_index = idx
+                        is_running = True
+                        forward_task = asyncio.create_task(
+                            autopost(client, foto_channel, link_channel, target, start_from_index)
+                        )
+                        await event.reply(f"🚀 Link ditemukan! Mulai dari urutan ke-{idx + 1}.")
+                    else:
+                        await event.reply("⚠️ Link tidak ditemukan di channel.")
+                else:
+                    await event.reply("⚙️ Gunakan: /start <nomor> atau /start <link>")
+            else:
+                await event.reply("⚙️ Gunakan: /start <nomor> atau /start <link>")
+
         else:
             await event.reply("❓ /on | /off | /status | /setting <menit> | /start <nomor|link>")
 
-    # Auto-reconnect loop
     while True:
         try:
             await client.run_until_disconnected()
         except TgConnectionError:
             print("⚠️ Koneksi terputus. Reconnect 5 detik...")
             await asyncio.sleep(5)
-            continue
         except Exception as e:
             print(f"[MAIN ERROR] {e}")
             await asyncio.sleep(5)
